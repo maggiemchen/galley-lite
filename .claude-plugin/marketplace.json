@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "galley-lite — comment-to-edit any local HTML with the Claude Code session that built it.",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "plugins": [
     {
       "name": "galley-lite",
       "source": "./",
       "description": "Open any local HTML, comment on elements or chat, and the Claude Code session that built it edits the file in place ($0, your subscription). Adds /galley and /galley-stop.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": { "name": "Maggie Chen" },
       "homepage": "https://github.com/maggiemchen/galley-lite",
       "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "galley-lite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Open any local HTML and comment on it or chat; the Claude Code session that built it edits the file in place, live-reloading, on your own subscription. Provides /galley and /galley-stop.",
   "author": {
     "name": "Maggie Chen"

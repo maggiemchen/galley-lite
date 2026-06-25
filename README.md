@@ -23,17 +23,21 @@ galley-lite is not an HTML editor. It's a visual layer for resuming Claude Code 
 
 ## Install
 
-Run it directly with npx, no install:
+Pick any surface:
 
 ```bash
+# npm — no install
 npx galley-lite report.html
-```
 
-Or install globally:
-
-```bash
+# npm — global
 npm install -g galley-lite
-galley-lite report.html
+
+# Homebrew
+brew install maggiemchen/galley-lite/galley-lite
+
+# Claude Code plugin (adds /galley and /galley-stop)
+/plugin marketplace add maggiemchen/galley-lite
+/plugin install galley-lite
 ```
 
 ## Quick start
@@ -94,10 +98,12 @@ galley-lite <file.html> [flags]
 
 galley-lite gives an agent write access to a directory on your machine, so it's built to be safe by default and to run only for you.
 
-- **Loopback only.** The server binds to `127.0.0.1` — never the LAN. Nothing on your network can reach the agent endpoints.
-- **Per-run CSRF token.** The edit / undo / stop endpoints require a per-run secret that's embedded only in the same-origin overlay. Other sites you have open can't read it, and the custom header forces a CORS preflight that's never approved — so a cross-origin page can't drive edits.
-- **Path-traversal-safe static serving.** Sibling assets the HTML references are served only from the file's own directory, with a strict separator-boundary check so a path like `<dir>-secret` can't sneak past.
-- **Agent scoped to the file's directory.** The `claude` process runs with `Read/Edit/Write/Grep/Glob` in the build session's working directory (or the file's directory) — exactly as powerful as running `claude` there yourself. **Point it at a project or working dir, not at `~` or a folder with secrets.**
+- **Loopback only.** The server binds to `127.0.0.1` — never the LAN.
+- **Per-run CSRF token + Host-header check.** State-changing endpoints require a per-run secret embedded only in the same-origin overlay (the custom header forces a CORS preflight that's never approved), and the server rejects unexpected `Host` headers — so neither a cross-origin page nor a DNS-rebinding site can read the conversation, read local files, or drive edits.
+- **Path-traversal-safe, auth-gated static serving.** Sibling assets are served only from the file's directory; over a share they require the share key, and dotfiles/secrets are blocked.
+- **Agent deny-list.** The `claude` process can't read `~/.ssh`, `~/.aws`, `.env` files, keys/credentials, or write shell rc files / git hooks — limiting the blast radius even if something tries to misuse it.
+
+> **Trust boundary — only open HTML you trust.** galley-lite injects its UI into the document you open, in the *same browser origin*. A malicious HTML file could try to drive the agent. The deny-list above limits what it could reach, but the safe rule is: don't `galley-lite` an HTML file from someone you don't trust, and point it at a working directory, not `~` or a secrets folder.
 
 ## Sharing (trusted-pair collaboration)
 
@@ -108,7 +114,7 @@ galley-lite gives an agent write access to a directory on your machine, so it's 
 - **Bounded.** `--share-ttl <min>` (default 120) sets link expiry; `--share-cap <n>` (default 40) caps total guest turns. Every guest request and your decision are appended to `~/.galley-lite-audit.jsonl`.
 - **This is for people you trust** (a teammate you'd pair with), not public sharing. The agent still edits files in your directory when you approve — approve only what you'd run yourself. For hands-off multiplayer, use the hosted galley instead.
 
-Requires `cloudflared` (`brew install cloudflared`); without it, galley-lite prints the share token so you can tunnel the port yourself.
+Requires `cloudflared` (`brew install cloudflared`). It's mandatory on purpose: cloudflared stamps an unforgeable header on guest requests, which is how the host/guest boundary holds. galley-lite won't hand out a link any other way (a self-rolled tunnel could leak host access).
 
 ## FAQ
 

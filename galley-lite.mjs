@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import { readFileSync, writeFileSync, existsSync, statSync, watch, createReadStream, readdirSync, appendFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { platform, homedir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { dirname, basename, extname, resolve, sep, join } from "node:path";
 
 // Per-run secret. State-changing endpoints (which invoke the agent + write files)
@@ -177,19 +177,75 @@ function audit(ev) {
     /* ignore */
   }
 }
-// A request arrived through the tunnel iff a forwarding proxy stamped it. The host
-// is always loopback with no such header, so this cleanly separates the two.
+let tunnelHost = null; // the trycloudflare hostname, once the tunnel is up
+// A request is a tunnel/guest request if ANY forwarding header is present — we
+// treat anything proxied as untrusted. The host is additionally required to be on
+// a real loopback socket (below), so an absent-header proxied request still can't
+// claim host. --share requires cloudflared (which stamps cf-connecting-ip), so a
+// genuine guest always trips this; see startShare.
 function isTunnelReq(req) {
-  return !!(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.headers["x-real-ip"]);
+  return !!(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers["forwarded"]);
+}
+function isLoopback(req) {
+  const a = req.socket && req.socket.remoteAddress;
+  return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+}
+// Host = a genuinely local request (loopback socket, no forwarding header). Used
+// for everything host-privileged so a forwarded/rebound request can never be host.
+function isHostReq(req) {
+  return isLoopback(req) && !isTunnelReq(req);
+}
+function eq(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 function shareValid(req) {
-  return SHARE && Date.now() < SHARE_EXPIRES && req.headers["x-galley-share"] === SHARE_TOKEN;
+  return SHARE && Date.now() < SHARE_EXPIRES && typeof req.headers["x-galley-share"] === "string" && eq(req.headers["x-galley-share"], SHARE_TOKEN);
 }
 function shareKeyValid(k) {
-  return SHARE && Date.now() < SHARE_EXPIRES && k === SHARE_TOKEN;
+  return SHARE && Date.now() < SHARE_EXPIRES && typeof k === "string" && eq(k, SHARE_TOKEN);
+}
+// Defeat DNS-rebinding: only serve requests whose Host header is one we expect.
+function validHost(req) {
+  const h = (req.headers.host || "").toLowerCase();
+  if (!h) return false;
+  const hostname = h.split(":")[0];
+  if (hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]") return true;
+  if (SHARE && tunnelHost && hostname === tunnelHost.toLowerCase()) return true;
+  return false;
 }
 // Pending guest requests awaiting host approval.
 const approvals = new Map(); // id -> { who, userText, comments, message }
+
+// Deny-list passed to the agent: it edits the user's document, but it must not be
+// usable (by a malicious opened HTML, or a tricked share approval) to read secrets
+// or write persistence/RCE paths. Verified: blocks .env/~/.ssh reads, edits still work.
+const AGENT_DENY = JSON.stringify({
+  permissions: {
+    deny: [
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.config/gh/**)",
+      "Read(~/.netrc)",
+      "Read(~/.claude/**)",
+      "Read(//**/.env)",
+      "Read(//**/.env.*)",
+      "Read(//**/*.pem)",
+      "Read(//**/id_rsa*)",
+      "Read(//**/id_ed25519*)",
+      "Read(//**/credentials)",
+      "Write(~/.zshrc)",
+      "Write(~/.bashrc)",
+      "Write(~/.bash_profile)",
+      "Write(~/.profile)",
+      "Edit(~/.zshrc)",
+      "Edit(~/.bashrc)",
+      "Write(//**/.git/hooks/**)",
+      "Edit(//**/.git/hooks/**)",
+    ],
+  },
+});
 
 // ---- claude batch edit (streamed) ----------------------------------------------
 function describeTool(name, input = {}) {
@@ -264,6 +320,8 @@ class ClaudeAgent {
       "acceptEdits",
       "--allowedTools",
       "Read Edit Write Grep Glob",
+      "--settings",
+      AGENT_DENY, // deny reading secrets / writing persistence paths — limits blast radius
       "--model",
       MODEL,
     ];
@@ -511,6 +569,7 @@ async function runTurn(comments, message, userText) {
     editing = false;
   }
   thread.push({ role: "assistant", text: out.reply });
+  while (thread.length > 400) thread.shift(); // bound memory + /thread payload
   broadcast({ type: "turn-end", reply: out.reply });
   process.stdout.write(`\x1b[1m\x1b[38;5;79m‹ claude\x1b[0m\n${out.reply}\n`);
   if (mtimeOf() !== before) broadcast({ type: "reload", changed: true });
@@ -830,18 +889,18 @@ const OVERLAY = /* html */ `
 const MIME = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".mjs": "text/javascript", ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf" };
 
 function serveMainHtml(res, req, key) {
-  // A request through the tunnel is a guest: it must present a valid share key and
-  // gets a page that embeds ONLY the share token (never the host CSRF token) + the
-  // guest role. A loopback request is the host: full CSRF token + host role.
-  const guest = isTunnelReq(req);
-  if (guest && !shareKeyValid(key)) {
+  // The host page (with the CSRF token) is served ONLY to a genuinely local request
+  // (loopback socket, no forwarding header). Anything else is a guest and must
+  // present a valid share key; it gets a page with only the share token.
+  const host = isHostReq(req);
+  if (!host && !shareKeyValid(key)) {
     res.writeHead(SHARE ? 403 : 404, { "content-type": "text/plain" });
     res.end(SHARE ? "This galley-lite share link is invalid or expired." : "not found");
     return;
   }
-  const auth = guest
-    ? `var GL_TOKEN=""; var GL_SHARE=${JSON.stringify(SHARE_TOKEN)}; var GL_ROLE="guest";`
-    : `var GL_TOKEN=${JSON.stringify(TOKEN)}; var GL_SHARE=""; var GL_ROLE="host";`;
+  const auth = host
+    ? `var GL_TOKEN=${JSON.stringify(TOKEN)}; var GL_SHARE=""; var GL_ROLE="host";`
+    : `var GL_TOKEN=""; var GL_SHARE=${JSON.stringify(SHARE_TOKEN)}; var GL_ROLE="guest";`;
   let html = readFileSync(FILE, "utf8");
   const inject = OVERLAY.replace("__GL_AUTH__", auth);
   const idx = html.toLowerCase().lastIndexOf("</body>");
@@ -876,15 +935,23 @@ function readBody(req) {
 }
 
 const server = createServer(async (req, res) => {
+  // Reject unexpected Host headers up front → defeats DNS-rebinding (a malicious
+  // site resolving to 127.0.0.1 still can't satisfy this).
+  if (!validHost(req)) {
+    res.writeHead(403, { "content-type": "text/plain" });
+    res.end("bad host");
+    return;
+  }
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const path = decodeURIComponent(url.pathname);
 
-  // Reads: the host (loopback, no tunnel header) always; a guest (tunnel) only with
-  // a valid share key (header or ?k).
-  const canRead = !isTunnelReq(req) || shareKeyValid(req.headers["x-galley-share"] || url.searchParams.get("k"));
+  // Reads: a genuinely-local host request always; a guest only with a valid share
+  // key (header or ?k). isHostReq requires a loopback socket AND no forwarding header.
+  const canRead = isHostReq(req) || shareKeyValid(req.headers["x-galley-share"] || url.searchParams.get("k"));
 
   if (path === "/__galley/events") {
     if (!canRead) { res.writeHead(403); res.end(); return; }
+    if (clients.size >= 64) { res.writeHead(503); res.end(); return; } // cap SSE fan-out
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
     res.write(": connected\n\n");
     res._glGuest = isTunnelReq(req);
@@ -902,9 +969,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // Role for writes: host = loopback with the CSRF token; guest = tunnel with a
-  // valid (unexpired) share token. Anything else is rejected.
-  const role = isTunnelReq(req) ? (shareValid(req) ? "guest" : "none") : (req.headers["x-galley-token"] === TOKEN ? "host" : "none");
+  // Role for writes: host = a genuinely-local request carrying the CSRF token;
+  // guest = a tunnel request with a valid share token. Anything else is rejected.
+  const role = isHostReq(req)
+    ? (typeof req.headers["x-galley-token"] === "string" && eq(req.headers["x-galley-token"], TOKEN) ? "host" : "none")
+    : (shareValid(req) ? "guest" : "none");
 
   // Host-only endpoints — guests can never stop, undo, approve, or reject.
   if (["/__galley/stop", "/__galley/undo", "/__galley/approve", "/__galley/reject"].includes(path) && req.method === "POST") {
@@ -1006,13 +1075,18 @@ const server = createServer(async (req, res) => {
   // Main document (root or its own name).
   if (path === "/" || path === "/" + NAME) return serveMainHtml(res, req, url.searchParams.get("k"));
 
-  // Static sibling files (assets the HTML references). Confined to DIR — resolve
-  // the path and require it to sit strictly inside DIR (a separator boundary, so
-  // a sibling like "<dir>-secret" can't sneak past a bare prefix match).
+  // Static sibling files (assets the HTML references). Confined to DIR (separator
+  // boundary), AND gated by canRead so a tunnel guest can't read arbitrary files
+  // with no key. Over a share, dotfiles / obvious secrets are blocked outright —
+  // a guest never needs them and the host is exposing a whole directory.
+  if (!canRead) { res.writeHead(403); res.end("forbidden"); return; }
   const rel = path.replace(/^\/+/, "");
   const target = resolve(DIR, rel);
+  const base = basename(target).toLowerCase();
+  const sensitive = base.startsWith(".") || /(^|\.)(env|pem|key|secret|credentials)(\.|$)/.test(base) || rel.split("/").some((s) => s === ".git" || s === ".ssh" || s === "node_modules");
+  if (SHARE && !isHostReq(req) && sensitive) { res.writeHead(403); res.end("forbidden"); return; }
   if (target.startsWith(DIR + sep) && existsSync(target) && statSync(target).isFile()) {
-    res.writeHead(200, { "content-type": MIME[extname(target).toLowerCase()] || "application/octet-stream" });
+    res.writeHead(200, { "content-type": MIME[extname(target).toLowerCase()] || "application/octet-stream", "referrer-policy": "no-referrer" });
     createReadStream(target).pipe(res);
     return;
   }
@@ -1084,35 +1158,37 @@ function startShare(port) {
   console.log("  │ Only share with people you'd trust to edit that directory.");
   console.log(`  │ Link expires in ${SHARE_TTL_MIN} min · guest turn cap ${SHARE_CAP} · audit: ${AUDIT}`);
   console.log("  └───────────────────────────────────────────────────────────────────");
-  console.log(`  share key: ${SHARE_TOKEN}`);
-  console.log("  establishing a public tunnel…");
-  const printLink = (base) => {
-    const link = `${base.replace(/\/$/, "")}/?k=${SHARE_TOKEN}`;
-    console.log(`\n  ✦ share this link:  ${link}\n`);
+  console.log("  establishing a public tunnel via cloudflared…");
+  const printLink = (host) => {
+    tunnelHost = host; // allow this Host header (validHost) — only after the tunnel is up
+    console.log(`\n  ✦ share this link:  https://${host}/?k=${SHARE_TOKEN}\n`);
   };
-  // Prefer a cloudflared quick tunnel (no account). Fall back to manual instructions.
+  // cloudflared is REQUIRED. It stamps cf-connecting-ip on every forwarded request
+  // (which a guest can't strip), so host-vs-guest is decided by a header the guest
+  // can't forge — not by a self-rolled tunnel that might omit it and leak the host
+  // token. If cloudflared is missing, refuse to share rather than hand out a token.
   let cf;
   try {
     cf = spawn("cloudflared", ["tunnel", "--url", `http://localhost:${port}`], { stdio: ["ignore", "pipe", "pipe"] });
   } catch {
     cf = null;
   }
-  if (!cf) return shareManual(port);
+  const refuse = () => {
+    console.log("\n  ✕ sharing needs cloudflared, which isn't installed.");
+    console.log("    install it:  brew install cloudflared   (or https://github.com/cloudflare/cloudflared)");
+    console.log("    then re-run with --share. (Don't tunnel it yourself — that can leak host access.)\n");
+  };
+  if (!cf) return refuse();
   let found = false;
   const scan = (d) => {
-    const m = String(d).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (m && !found) { found = true; printLink(m[0]); }
+    const m = String(d).match(/https:\/\/([a-z0-9-]+\.trycloudflare\.com)/);
+    if (m && !found) { found = true; printLink(m[1]); }
   };
   cf.stdout.on("data", scan);
   cf.stderr.on("data", scan);
-  cf.on("error", () => shareManual(port));
-  cf.on("close", () => { if (!found) shareManual(port); });
+  cf.on("error", refuse);
+  cf.on("close", () => { if (!found) refuse(); });
   process.on("exit", () => { try { cf.kill(); } catch { /* ignore */ } });
-}
-function shareManual(port) {
-  console.log("  cloudflared not found — install it (brew install cloudflared) for a one-command public link,");
-  console.log("  or tunnel port " + port + " yourself, then append the key to the public URL:");
-  console.log(`     <your-public-url>/?k=${SHARE_TOKEN}\n`);
 }
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { agent.killSync(); process.exit(0); });
