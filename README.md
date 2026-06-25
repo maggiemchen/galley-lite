@@ -1,0 +1,131 @@
+# galley-lite
+
+Point at any HTML file and reconnect to the Claude Code session that built it — visually.
+
+galley-lite is not an HTML editor. It's a visual layer for resuming Claude Code sessions, anchored to their output. You run it on a file, click elements on the rendered page or just chat, and the original build session edits the file in place and live-reloads it. Local, private, and free — it runs on your Claude subscription, not the metered API.
+
+![demo](docs/demo.gif)
+
+## What it does
+
+- **Reconnects to the build session.** On startup it scans `~/.claude/projects` for the Claude Code session that did a `Write`/`Edit` to this exact file, and resumes it. Edits inherit *how and why* the file was built — its sources, data, and reasoning — not just the rendered HTML.
+- **Click to comment, or just chat.** Open the page, turn on Comment, click any element to attach an anchored note, or type in the side panel. Batch several comments and send once.
+- **Edits the file in place + live-reloads.** A warm `claude` session edits the file on disk; the page reloads itself and flashes the elements that changed.
+- **Streams the reply.** Token-by-token, rendered as markdown, with live tool activity ("Reading report.html", "Editing report.html").
+- **Undo and Stop.** Undo reverts the last turn (50 deep). Stop kills the in-flight turn.
+- **$0 marginal.** It shells out to `claude` with `ANTHROPIC_API_KEY` stripped, so every edit bills your Claude subscription, not the metered API.
+
+## Requirements
+
+- **Claude Code installed and logged in** (`claude` on your `PATH`).
+- **An active Claude subscription** (Pro or Max). galley-lite intentionally strips `ANTHROPIC_API_KEY` so edits run on your subscription at $0 marginal cost.
+- Node 18+ (zero npm dependencies — it's a single file using only Node built-ins).
+
+## Install
+
+Run it directly with npx, no install:
+
+```bash
+npx galley-lite report.html
+```
+
+Or install globally:
+
+```bash
+npm install -g galley-lite
+galley-lite report.html
+```
+
+## Quick start
+
+```bash
+galley-lite report.html
+```
+
+This opens `http://localhost:4321` in your browser. Click **💬 Comment**, pick an element, describe the change — or just type in the **Chat** panel. The original build session is pre-warmed while you read the page, so your first edit lands fast.
+
+## How it works
+
+galley-lite runs a tiny loopback HTTP server that serves your HTML with an overlay injected before `</body>`. Behind it sits one persistent, warm `claude` process per document.
+
+- **Warm session.** The process boots once (resuming the build session if found) and keeps the document and conversation in context. The first turn pays the boot + read; every follow-up skips both, so later turns are fast.
+- **Auto-link.** Before booting, it finds the session that built the file and resumes it — so edits are made by the agent that already knows the file's history, with no flags.
+- **$0.** `ANTHROPIC_API_KEY` is removed from the child's environment, so `claude` bills your subscription. If the key is set, galley-lite prints a note that it's being ignored on purpose.
+
+A pure question doesn't reload the page; an edit reloads it once when the turn finishes. The conversation lives server-side, so it survives reloads.
+
+## Session continuity (the auto-link)
+
+This is the point of the tool. A hosted doc editor or a generic browser agent only sees the rendered HTML. galley-lite resumes the *actual* Claude Code session that produced it.
+
+By default, `galley-lite <file>` does this automatically:
+
+1. If you passed `--resume <id>`, it uses that session.
+2. Otherwise, if the HTML contains `<!-- galley-session: <id> -->`, it uses that marker.
+3. Otherwise, it scans the 80 most-recent transcripts in `~/.claude/projects` for a `Write`/`Edit`/`MultiEdit` to this exact absolute path, and resumes the first match — recovering that session's working directory too (a resumed session has to run from its original project dir).
+
+Overrides:
+
+| Override | Effect |
+|---|---|
+| `--fresh` | Skip auto-link; start a clean session that just chains forward. |
+| `--resume <id>` | Force a specific session id. |
+| `<!-- galley-session: <id> -->` | Explicit marker baked into the HTML (wins over auto-detect). |
+
+Linking to a large build session means each turn reloads its context first, so replies can be slower. Use `--fresh` when you want speed over provenance.
+
+## Flags
+
+```
+galley-lite <file.html> [flags]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--port <n>` | `4321` | Server port. If taken, auto-falls-back to the next free port (up to +20). |
+| `--model <id>` | `sonnet` | `sonnet` / `opus` / `haiku`, or a full model id. |
+| `--resume <id>` | — | Force edits to resume this Claude session (full context). |
+| `--cwd <dir>` | auto | Directory the agent runs in. Defaults to the build session's dir, else the file's dir. |
+| `--fresh` | off | Skip auto-link; start a clean session. |
+| `--no-open` | off | Don't open the browser on start. |
+| `--help` | — | Print usage and exit. |
+
+## Security
+
+galley-lite gives an agent write access to a directory on your machine, so it's built to be safe by default and to run only for you.
+
+- **Loopback only.** The server binds to `127.0.0.1` — never the LAN. Nothing on your network can reach the agent endpoints.
+- **Per-run CSRF token.** The edit / undo / stop endpoints require a per-run secret that's embedded only in the same-origin overlay. Other sites you have open can't read it, and the custom header forces a CORS preflight that's never approved — so a cross-origin page can't drive edits.
+- **Path-traversal-safe static serving.** Sibling assets the HTML references are served only from the file's own directory, with a strict separator-boundary check so a path like `<dir>-secret` can't sneak past.
+- **Agent scoped to the file's directory.** The `claude` process runs with `Read/Edit/Write/Grep/Glob` in the build session's working directory (or the file's directory) — exactly as powerful as running `claude` there yourself. **Point it at a project or working dir, not at `~` or a folder with secrets.**
+
+## Sharing (trusted-pair collaboration)
+
+`galley-lite report.html --share` opens a public tunnel (via `cloudflared`) and prints a guest link. A guest can open the page, read the live conversation, and *suggest* edits — but **nothing a guest sends runs until you approve it.**
+
+- **Owner-gated.** A guest's message becomes a pending request in your panel. You read the literal prompt and click Approve or Reject. Only on approval does it run, attributed to the guest. Guests can't undo, stop, or approve.
+- **No host access for guests.** The guest page never contains your local CSRF token — only a separate, expiring share token. The host (you) is always on loopback; guests always arrive through the tunnel, and the two can't cross over.
+- **Bounded.** `--share-ttl <min>` (default 120) sets link expiry; `--share-cap <n>` (default 40) caps total guest turns. Every guest request and your decision are appended to `~/.galley-lite-audit.jsonl`.
+- **This is for people you trust** (a teammate you'd pair with), not public sharing. The agent still edits files in your directory when you approve — approve only what you'd run yourself. For hands-off multiplayer, use the hosted galley instead.
+
+Requires `cloudflared` (`brew install cloudflared`); without it, galley-lite prints the share token so you can tunnel the port yourself.
+
+## FAQ
+
+**Does it cost money?**
+No marginal cost. galley-lite strips `ANTHROPIC_API_KEY` and shells out to `claude`, so edits run on your existing Claude subscription, not the metered API. You need an active subscription (Pro or Max).
+
+**Is my code or my file sent anywhere?**
+Only to Claude, the same way any Claude Code session sends context to Anthropic. galley-lite itself is local: a loopback server, no telemetry, no third-party services, no account. Your file is edited in place on disk.
+
+**What models can I use?**
+`--model sonnet` (default), `opus`, or `haiku`, or any full model id your subscription supports.
+
+**Do I have to use the click-to-comment flow?**
+No. You can just chat in the side panel. Ask a question ("why are these numbers stale?") and it answers without touching the file; say "ok, fix them" and it edits. Comments are an optional way to anchor a request to a specific element.
+
+**What if port 4321 is busy?**
+It automatically tries the next port (up to +20) and prints the URL it actually bound.
+
+**Does it work if the file wasn't built by Claude Code?**
+Yes. If there's no build session to link, it runs a fresh session that just chains forward turn to turn. You lose the provenance, not the editing.

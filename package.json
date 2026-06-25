@@ -1,0 +1,43 @@
+{
+  "name": "galley-lite",
+  "version": "0.1.0",
+  "description": "Point at any local HTML and reconnect to the Claude Code session that built it. Claude edits the file in place, live-reloads, on your subscription ($0). Local, private, zero-dependency.",
+  "type": "module",
+  "bin": {
+    "galley-lite": "galley-lite.mjs"
+  },
+  "files": [
+    "galley-lite.mjs",
+    "examples/sample.html",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node galley-lite.mjs"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "html",
+    "editor",
+    "ai",
+    "cli",
+    "agent",
+    "live-reload",
+    "local"
+  ],
+  "license": "MIT",
+  "author": "Maggie Chen",
+  "homepage": "https://github.com/maggiemchen/galley-lite#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maggiemchen/galley-lite.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maggiemchen/galley-lite/issues"
+  }
+}
