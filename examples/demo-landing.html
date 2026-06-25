@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nimbus</title>
+<style>
+  :root{ --ink:#16140f; --muted:#6b6258; --paper:#f6f1e7; --accent:#2d6373; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:'Inter',system-ui,-apple-system,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .hero{max-width:680px;padding:60px 40px;text-align:center}
+  .badge{display:inline-block;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+    border:1px solid #d8cfbf;border-radius:20px;padding:5px 13px;margin-bottom:28px}
+  h1{font-family:Georgia,serif;font-size:54px;line-height:1.05;letter-spacing:-.02em;margin:0 0 20px;font-weight:600}
+  p.sub{font-size:19px;line-height:1.6;color:var(--muted);margin:0 0 36px}
+  .cta{display:inline-block;background:var(--ink);color:var(--paper);text-decoration:none;font-weight:600;
+    font-size:16px;padding:14px 30px;border-radius:10px;transition:transform .15s}
+  .cta:hover{transform:translateY(-2px)}
+  .foot{margin-top:40px;font-size:13px;color:#a39a8c}
+</style>
+</head>
+<body>
+  <div class="hero">
+    <span class="badge">Nimbus</span>
+    <h1 id="headline">A place to put your files.</h1>
+    <p class="sub" id="sub">Nimbus stores your documents in the cloud so you can access them later. It is reliable and works on most devices.</p>
+    <a class="cta" id="cta" href="#">Sign up</a>
+    <div class="foot">No credit card required.</div>
+  </div>
+</body>
+</html>

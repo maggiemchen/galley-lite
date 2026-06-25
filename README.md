@@ -4,7 +4,7 @@ Point at any HTML file and reconnect to the Claude Code session that built it â€
 
 galley-lite is not an HTML editor. It's a visual layer for resuming Claude Code sessions, anchored to their output. You run it on a file, click elements on the rendered page or just chat, and the original build session edits the file in place and live-reloads it. Local, private, and free â€” it runs on your Claude subscription, not the metered API.
 
-![demo](docs/demo.gif)
+![galley-lite demo](https://raw.githubusercontent.com/maggiemchen/galley-lite/main/docs/demo.gif)
 
 ## What it does
 
