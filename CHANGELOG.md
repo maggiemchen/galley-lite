@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 — 2026-06-25
+
+Pre-publish DX pass (cold-install + CLI stress test):
+
+- `galley-lite --help` now exits 0 (was exit 1 — the code tied the exit code to
+  whether a file was given, so an explicit `--help` reported failure). No-file
+  and bad-file still exit 1.
+
 ## 0.1.1 — 2026-06-25
 
 Security hardening (pre-launch adversarial review):

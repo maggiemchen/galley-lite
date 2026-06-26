@@ -40,7 +40,7 @@ if (!fileArg || flags.help) {
   console.log("       advanced: [--resume <sessionId>] [--cwd <dir>]");
   console.log("  Opens the file in your browser; comment on elements or chat, and Claude edits it in place ($0, your subscription).");
   console.log("  Auto-links to the Claude Code session that built the file. --fresh skips it; --resume <id> forces one.");
-  process.exit(fileArg ? 0 : 1);
+  process.exit(flags.help ? 0 : 1); // --help is a successful invocation; only no-file-given is an error
 }
 const FILE = resolve(fileArg);
 if (!existsSync(FILE)) {

@@ -1,6 +1,6 @@
 {
   "name": "galley-lite",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Point at any local HTML and reconnect to the Claude Code session that built it. Claude edits the file in place, live-reloads, on your subscription ($0). Local, private, zero-dependency.",
   "type": "module",
   "bin": {
