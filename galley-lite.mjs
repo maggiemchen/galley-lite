@@ -169,6 +169,19 @@ const SHARE_EXPIRES = SHARE ? Date.now() + SHARE_TTL_MIN * 60_000 : 0;
 const SHARE_CAP = Number(flags["share-cap"]) || 40; // max guest-approved turns
 let guestTurns = 0;
 const AUDIT = join(homedir(), ".galley-lite-audit.jsonl");
+// Deterministic, append-only event log for journey/metrics analysis — one JSON
+// object per line. OFF by default so normal runs stay side-effect-free; a harness
+// opts in with GALLEY_EVENTS=1 (default path) or GALLEY_EVENTS_LOG=/path.jsonl.
+const EVENTS_LOG = process.env.GALLEY_EVENTS_LOG || (process.env.GALLEY_EVENTS ? join(homedir(), ".galley-lite-events.jsonl") : null);
+const RUN_ID = randomUUID().slice(0, 8);
+let _turnSeq = 0;
+const nextTurnId = () => `t${++_turnSeq}`;
+function logEvent(type, data = {}) {
+  if (!EVENTS_LOG) return;
+  try {
+    appendFileSync(EVENTS_LOG, JSON.stringify({ ts: Date.now(), run: RUN_ID, file: FILE, type, ...data }) + "\n");
+  } catch { /* never let logging break a turn */ }
+}
 function audit(ev) {
   if (!SHARE) return;
   try {
@@ -330,13 +343,16 @@ class ClaudeAgent {
     delete env.ANTHROPIC_API_KEY; // bill the subscription, not the metered API
     this.buf = "";
     this.child = spawn("claude", args, { cwd: AGENT_CWD, env });
+    logEvent("agent_spawn", { withResume: !!sessionId });
     this.child.stdout.on("data", (d) => this._data(d));
     this.child.stderr.on("data", () => {});
     const die = (e) => {
       this.child = null;
       const f = this.onErr;
       this.onErr = this.onResult = this.onEvent = null;
+      const wasBusy = this.busy;
       this.busy = false;
+      logEvent("agent_died", { reason: String((e && e.message) || e), midTurn: wasBusy });
       if (f) f(e);
     };
     this.child.on("close", () => die(new Error("claude process exited")));
@@ -363,7 +379,7 @@ class ClaudeAgent {
         }
       } else if (ev.type === "assistant") {
         for (const b of ev.message?.content || []) {
-          if (b.type === "tool_use" && this.onEvent) this.onEvent({ kind: "tool", text: describeTool(b.name, b.input || {}) });
+          if (b.type === "tool_use" && this.onEvent) this.onEvent({ kind: "tool", text: describeTool(b.name, b.input || {}), name: b.name });
         }
       } else if (ev.type === "result") {
         if (ev.session_id) sessionId = ev.session_id; // chain forward (for respawn/marker)
@@ -548,9 +564,13 @@ const mtimeOf = () => {
 // activity streamed to all clients + the terminal), records the reply, and reloads
 // the doc only if the file actually changed.
 async function runTurn(comments, message, userText) {
+  const turnId = nextTurnId();
+  const t0 = Date.now();
+  let firstTokenAt = 0, editsN = 0;
   thread.push({ role: "user", text: userText });
   broadcast({ type: "turn", role: "user", text: userText });
   process.stdout.write(`\n\x1b[1m\x1b[38;5;209m› you\x1b[0m\n${userText}\n`);
+  logEvent("turn_started", { turnId, comments_n: comments.length, text_len: userText.length });
 
   snapshot();
   const before = mtimeOf();
@@ -559,8 +579,10 @@ async function runTurn(comments, message, userText) {
   try {
     out = await agent.send(buildTurnPrompt(comments, message), (e) => {
       if (e.kind === "token") {
+        if (!firstTokenAt) { firstTokenAt = Date.now(); logEvent("turn_first_token", { turnId, ms: firstTokenAt - t0 }); }
         broadcast({ type: "token", text: e.text }); // live-typing reply
       } else {
+        if (e.kind === "tool") { logEvent("tool_used", { turnId, tool: e.name || null }); if (e.name === "Edit" || e.name === "Write" || e.name === "MultiEdit") editsN++; }
         broadcast({ type: "activity", kind: e.kind, text: e.text });
         if (e.kind === "tool" || e.kind === "error") process.stdout.write(`\x1b[2m  · ${e.text}\x1b[0m\n`);
       }
@@ -572,7 +594,9 @@ async function runTurn(comments, message, userText) {
   while (thread.length > 400) thread.shift(); // bound memory + /thread payload
   broadcast({ type: "turn-end", reply: out.reply });
   process.stdout.write(`\x1b[1m\x1b[38;5;79m‹ claude\x1b[0m\n${out.reply}\n`);
-  if (mtimeOf() !== before) broadcast({ type: "reload", changed: true });
+  const changed = mtimeOf() !== before;
+  if (changed) { broadcast({ type: "reload", changed: true }); logEvent("edit_applied", { turnId, edits_n: editsN }); logEvent("file_reloaded", { turnId }); }
+  logEvent("turn_completed", { turnId, ok: !!out.ok, changed, edits_n: editsN, duration_ms: Date.now() - t0, reply_len: (out.reply || "").length });
   return out;
 }
 
@@ -963,7 +987,8 @@ const server = createServer(async (req, res) => {
     res._glGuest = isTunnelReq(req);
     clients.add(res);
     sendPresence();
-    req.on("close", () => { clients.delete(res); sendPresence(); });
+    logEvent("sse_connected", { clients: clients.size, guest: !!res._glGuest });
+    req.on("close", () => { clients.delete(res); sendPresence(); logEvent("sse_closed", { clients: clients.size }); });
     return;
   }
 
@@ -992,6 +1017,7 @@ const server = createServer(async (req, res) => {
 
   if (path === "/__galley/stop" && req.method === "POST") {
     agent.close();
+    logEvent("turn_stopped", {});
     broadcast({ type: "activity", kind: "error", text: "stopped by host" });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
@@ -1010,6 +1036,7 @@ const server = createServer(async (req, res) => {
     const comments = Array.isArray(body.comments) ? body.comments : [];
     const message = typeof body.message === "string" ? body.message : "";
     if (!comments.length && !message.trim()) {
+      logEvent("send_rejected", { reason: "empty" });
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, reply: "say something" }));
       return;
@@ -1035,6 +1062,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     // host
+    logEvent("turn_sent", { source: comments.length ? "comment" : "chat", comments_n: comments.length, text_len: userText.length, queue_depth: queueDepth });
     const out = await enqueueTurn(() => runTurn(comments, message, userText));
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(out));
@@ -1073,6 +1101,7 @@ const server = createServer(async (req, res) => {
       writeFileSync(FILE, undoStack.pop());
       ok = true;
     }
+    logEvent("undo", { ok });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok }));
     return;
@@ -1134,6 +1163,7 @@ server.on("error", (e) => {
 });
 server.on("listening", () => {
   const url = `http://localhost:${boundPort}`;
+  logEvent("server_start", { port: boundPort, requestedPort: PORT, model: MODEL, linkMode, sessionId, apiKeyIgnored: !!process.env.ANTHROPIC_API_KEY });
   console.log(`\n  galley-lite → ${url}`);
   console.log(`  editing:   ${FILE}`);
   console.log(`  model:     ${MODEL} (Claude subscription, $0 marginal)`);
