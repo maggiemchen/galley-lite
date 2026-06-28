@@ -343,10 +343,13 @@ class ClaudeAgent {
     delete env.ANTHROPIC_API_KEY; // bill the subscription, not the metered API
     this.buf = "";
     this.child = spawn("claude", args, { cwd: AGENT_CWD, env });
-    logEvent("agent_spawn", { withResume: !!sessionId });
+    this._died = false;
+    logEvent("agent_spawn", { withResume: !!sessionId, pid: this.child.pid });
     this.child.stdout.on("data", (d) => this._data(d));
     this.child.stderr.on("data", () => {});
     const die = (e) => {
+      if (this._died) return; // idempotent — error + close both fire on one death
+      this._died = true;
       this.child = null;
       const f = this.onErr;
       this.onErr = this.onResult = this.onEvent = null;
@@ -379,7 +382,7 @@ class ClaudeAgent {
         }
       } else if (ev.type === "assistant") {
         for (const b of ev.message?.content || []) {
-          if (b.type === "tool_use" && this.onEvent) this.onEvent({ kind: "tool", text: describeTool(b.name, b.input || {}), name: b.name });
+          if (b.type === "tool_use" && this.onEvent) this.onEvent({ kind: "tool", text: describeTool(b.name, b.input || {}), name: b.name, n: b.name === "MultiEdit" ? ((b.input && b.input.edits && b.input.edits.length) || 1) : 1 });
         }
       } else if (ev.type === "result") {
         if (ev.session_id) sessionId = ev.session_id; // chain forward (for respawn/marker)
@@ -519,7 +522,7 @@ function armWatch() {
       }
       if (!editing) {
         clearTimeout(reloadTimer);
-        reloadTimer = setTimeout(() => broadcast({ type: "reload" }), 150);
+        reloadTimer = setTimeout(() => { broadcast({ type: "reload" }); logEvent("file_reloaded", { source: "external" }); }, 150);
       }
       setTimeout(armWatch, 200); // re-arm after the (possibly inode-swapping) write settles
     });
@@ -542,8 +545,10 @@ function safeJson(str) {
 // racing the shared thread / editing flag / undo stack / single warm agent.
 let turnChain = Promise.resolve();
 let queueDepth = 0;
+let currentTurnId = null; // the turn actively running (for stop attribution)
 function enqueueTurn(fn) {
   queueDepth++;
+  logEvent("turn_queued", { depth: queueDepth });
   if (queueDepth > 1) broadcast({ type: "activity", kind: "tool", text: `queued — ${queueDepth - 1} turn(s) ahead` });
   const run = turnChain.then(fn, fn);
   turnChain = run.catch(() => {});
@@ -565,6 +570,7 @@ const mtimeOf = () => {
 // the doc only if the file actually changed.
 async function runTurn(comments, message, userText) {
   const turnId = nextTurnId();
+  currentTurnId = turnId;
   const t0 = Date.now();
   let firstTokenAt = 0, editsN = 0;
   thread.push({ role: "user", text: userText });
@@ -582,7 +588,7 @@ async function runTurn(comments, message, userText) {
         if (!firstTokenAt) { firstTokenAt = Date.now(); logEvent("turn_first_token", { turnId, ms: firstTokenAt - t0 }); }
         broadcast({ type: "token", text: e.text }); // live-typing reply
       } else {
-        if (e.kind === "tool") { logEvent("tool_used", { turnId, tool: e.name || null }); if (e.name === "Edit" || e.name === "Write" || e.name === "MultiEdit") editsN++; }
+        if (e.kind === "tool") { logEvent("tool_used", { turnId, tool: e.name || null, n: e.n || 1 }); if (e.name === "Edit" || e.name === "Write" || e.name === "MultiEdit") editsN += (e.n || 1); }
         broadcast({ type: "activity", kind: e.kind, text: e.text });
         if (e.kind === "tool" || e.kind === "error") process.stdout.write(`\x1b[2m  · ${e.text}\x1b[0m\n`);
       }
@@ -597,6 +603,7 @@ async function runTurn(comments, message, userText) {
   const changed = mtimeOf() !== before;
   if (changed) { broadcast({ type: "reload", changed: true }); logEvent("edit_applied", { turnId, edits_n: editsN }); logEvent("file_reloaded", { turnId }); }
   logEvent("turn_completed", { turnId, ok: !!out.ok, changed, edits_n: editsN, duration_ms: Date.now() - t0, reply_len: (out.reply || "").length });
+  currentTurnId = null;
   return out;
 }
 
@@ -1017,7 +1024,7 @@ const server = createServer(async (req, res) => {
 
   if (path === "/__galley/stop" && req.method === "POST") {
     agent.close();
-    logEvent("turn_stopped", {});
+    logEvent("turn_stopped", { turnId: currentTurnId });
     broadcast({ type: "activity", kind: "error", text: "stopped by host" });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
