@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // galley-lite — open any local HTML, click an element, leave a comment, and a
-// Claude Code session (on your subscription, $0) edits the file in place + live
-// reloads. Zero deps, single file. Works on any HTML on disk.
+// Claude Code session edits the file in place + live reloads. Bring your own
+// Anthropic API key (ANTHROPIC_API_KEY). Zero deps, single file. Works on any
+// HTML on disk.
 //
 //   node galley-lite.mjs report.html [--port 4321] [--model sonnet] [--resume <sessionId>]
 //
@@ -38,7 +39,7 @@ const fileArg = positionals[0];
 if (!fileArg || flags.help) {
   console.log("Usage: galley-lite <file.html> [--port 4321] [--model sonnet] [--fresh] [--no-open]");
   console.log("       advanced: [--resume <sessionId>] [--cwd <dir>]");
-  console.log("  Opens the file in your browser; comment on elements or chat, and Claude edits it in place ($0, your subscription).");
+  console.log("  Opens the file in your browser; comment on elements or chat, and Claude edits it in place.");
   console.log("  Auto-links to the Claude Code session that built the file. --fresh skips it; --resume <id> forces one.");
   process.exit(flags.help ? 0 : 1); // --help is a successful invocation; only no-file-given is an error
 }
@@ -169,19 +170,6 @@ const SHARE_EXPIRES = SHARE ? Date.now() + SHARE_TTL_MIN * 60_000 : 0;
 const SHARE_CAP = Number(flags["share-cap"]) || 40; // max guest-approved turns
 let guestTurns = 0;
 const AUDIT = join(homedir(), ".galley-lite-audit.jsonl");
-// Deterministic, append-only event log for journey/metrics analysis — one JSON
-// object per line. OFF by default so normal runs stay side-effect-free; a harness
-// opts in with GALLEY_EVENTS=1 (default path) or GALLEY_EVENTS_LOG=/path.jsonl.
-const EVENTS_LOG = process.env.GALLEY_EVENTS_LOG || (process.env.GALLEY_EVENTS ? join(homedir(), ".galley-lite-events.jsonl") : null);
-const RUN_ID = randomUUID().slice(0, 8);
-let _turnSeq = 0;
-const nextTurnId = () => `t${++_turnSeq}`;
-function logEvent(type, data = {}) {
-  if (!EVENTS_LOG) return;
-  try {
-    appendFileSync(EVENTS_LOG, JSON.stringify({ ts: Date.now(), run: RUN_ID, file: FILE, type, ...data }) + "\n");
-  } catch { /* never let logging break a turn */ }
-}
 function audit(ev) {
   if (!SHARE) return;
   try {
@@ -310,6 +298,21 @@ function buildTurnPrompt(comments, message) {
 // context, and serves each turn over stdin — so follow-ups skip both the process
 // boot AND re-reading the file. Verified: stream-json + Edit/Write + acceptEdits
 // edits without a permission hang, and --resume restores context.
+// Deterministic, append-only event log for journey/metrics verification — one
+// JSON object per line. OFF by default so normal runs stay side-effect-free; a
+// harness opts in with GALLEY_EVENTS=1 (default path) or GALLEY_EVENTS_LOG=/path.
+const EVENTS_LOG = process.env.GALLEY_EVENTS_LOG || (process.env.GALLEY_EVENTS ? join(homedir(), ".galley-lite-events.jsonl") : null);
+const RUN_ID = randomUUID().slice(0, 8);
+let _turnSeq = 0;
+const nextTurnId = () => `t${++_turnSeq}`;
+let currentTurnId = null; // the turn actively running (for stop attribution)
+function logEvent(type, data = {}) {
+  if (!EVENTS_LOG) return;
+  try {
+    appendFileSync(EVENTS_LOG, JSON.stringify({ ts: Date.now(), run: RUN_ID, file: FILE, type, ...data }) + "\n");
+  } catch { /* never let logging break a turn */ }
+}
+
 class ClaudeAgent {
   constructor() {
     this.child = null;
@@ -339,8 +342,11 @@ class ClaudeAgent {
       MODEL,
     ];
     if (sessionId) args.push("--resume", sessionId); // resume the build session ONCE
+    // API-key-first: if ANTHROPIC_API_KEY is set, claude runs on the metered
+    // Anthropic API (billed to that key — the supported, ToS-clean path). If it
+    // isn't set, claude falls back to whatever auth it already has locally. We
+    // neither inject nor strip the key: the user's own environment picks the mode.
     const env = { ...process.env };
-    delete env.ANTHROPIC_API_KEY; // bill the subscription, not the metered API
     this.buf = "";
     this.child = spawn("claude", args, { cwd: AGENT_CWD, env });
     this._died = false;
@@ -382,7 +388,21 @@ class ClaudeAgent {
         }
       } else if (ev.type === "assistant") {
         for (const b of ev.message?.content || []) {
-          if (b.type === "tool_use" && this.onEvent) this.onEvent({ kind: "tool", text: describeTool(b.name, b.input || {}), name: b.name, n: b.name === "MultiEdit" ? ((b.input && b.input.edits && b.input.edits.length) || 1) : 1 });
+          if (b.type !== "tool_use" || !this.onEvent) continue;
+          const input = b.input || {};
+          this.onEvent({ kind: "tool", text: describeTool(b.name, input), name: b.name, n: b.name === "MultiEdit" ? ((input.edits && input.edits.length) || 1) : 1 });
+          // Capture the agent's OWN edits — this is the faithful source for the
+          // "what changed" readout (what the agent changed, not what the user
+          // clicked). Edit/MultiEdit carry new_string(s); Write replaces the file.
+          if (b.name === "Edit" || b.name === "MultiEdit" || b.name === "Write") {
+            const newStrings =
+              b.name === "MultiEdit"
+                ? (Array.isArray(input.edits) ? input.edits.map((e) => e && e.new_string).filter((s) => typeof s === "string") : [])
+                : typeof input.new_string === "string"
+                ? [input.new_string]
+                : [];
+            this.onEvent({ kind: "edit", tool: b.name, filePath: input.file_path || "", newStrings });
+          }
         }
       } else if (ev.type === "result") {
         if (ev.session_id) sessionId = ev.session_id; // chain forward (for respawn/marker)
@@ -522,7 +542,7 @@ function armWatch() {
       }
       if (!editing) {
         clearTimeout(reloadTimer);
-        reloadTimer = setTimeout(() => { broadcast({ type: "reload" }); logEvent("file_reloaded", { source: "external" }); }, 150);
+        reloadTimer = setTimeout(() => { broadcast({ type: "reload", external: true }); logEvent("file_reloaded", { source: "external" }); }, 150);
       }
       setTimeout(armWatch, 200); // re-arm after the (possibly inode-swapping) write settles
     });
@@ -540,12 +560,71 @@ function safeJson(str) {
   }
 }
 
+// ---- change tracking: the faithful "what changed" readout ----------------------
+// The readout must reflect what the AGENT actually changed (its own Edit/Write
+// fragments + a before/after content compare), NOT what the user clicked. Each
+// turn's change is stored under a monotonic id; the client fetches it after reload.
+let changeSeq = 0;
+const changes = new Map(); // id -> change object
+const CHANGES_MAX = 30;
+const FRAG_CAP = 25; // beyond this, a turn is a "large edit", not an enumeration
+function putChange(obj) {
+  const id = ++changeSeq;
+  changes.set(id, { id, ...obj });
+  while (changes.size > CHANGES_MAX) changes.delete(changes.keys().next().value);
+  return id;
+}
+// Is source offset `idx` inside a <tag>…</tag> block (so a CSS/JS edit isn't
+// reported as a changed visible element)?
+function enclosedBy(after, idx, tag) {
+  const open = after.lastIndexOf("<" + tag, idx);
+  if (open < 0) return false;
+  const close = after.indexOf("</" + tag + ">", open);
+  return close < 0 || close > idx;
+}
+function classifyFragment(after, text) {
+  const idx = after.indexOf(text);
+  if (idx < 0) return "visual"; // reformatted/not found verbatim — assume visible
+  if (enclosedBy(after, idx, "style")) return "style";
+  if (enclosedBy(after, idx, "script")) return "script";
+  return "visual";
+}
+// Pure (unit-testable): derive the change payload from before/after content + the
+// agent's own edit fragments. kind ∈ none | edit | write.
+function computeChange(before, after, edits) {
+  const contentChanged = before !== after;
+  const byteDelta = after.length - before.length;
+  if (!contentChanged) return { kind: "none", contentChanged: false, fragments: [], byteDelta: 0 };
+  const hasWrite = edits.some((e) => e.tool === "Write");
+  const frags = [];
+  for (const e of edits) {
+    if (e.tool === "Write") continue; // whole-file rewrite: not granular
+    for (const ns of e.newStrings || []) {
+      const t = String(ns || "").trim();
+      if (t) frags.push(t);
+    }
+  }
+  // Whole-file Write, a reformat with no captured Edit fragments, or a huge edit:
+  // don't fake an element count — say "rewrote the page".
+  if (hasWrite || frags.length === 0 || frags.length > FRAG_CAP) {
+    return { kind: "write", contentChanged: true, fragments: [], byteDelta, fragCount: frags.length };
+  }
+  const seen = new Set();
+  const fragments = [];
+  for (const text of frags) {
+    const key = text.slice(0, 200);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fragments.push({ text: text.slice(0, 4000), type: classifyFragment(after, text) });
+  }
+  return { kind: "edit", contentChanged: true, fragments, byteDelta };
+}
+
 // FIFO turn queue: every /send runs through this chain, so concurrent senders
 // (multiple tabs, a tunnel guest) line up and execute one at a time instead of
 // racing the shared thread / editing flag / undo stack / single warm agent.
 let turnChain = Promise.resolve();
 let queueDepth = 0;
-let currentTurnId = null; // the turn actively running (for stop attribution)
 function enqueueTurn(fn) {
   queueDepth++;
   logEvent("turn_queued", { depth: queueDepth });
@@ -557,14 +636,6 @@ function enqueueTurn(fn) {
   });
 }
 
-const mtimeOf = () => {
-  try {
-    return statSync(FILE).mtimeMs;
-  } catch {
-    return 0;
-  }
-};
-
 // One serialized conversational turn. Pushes the user turn, runs the agent (with
 // activity streamed to all clients + the terminal), records the reply, and reloads
 // the doc only if the file actually changed.
@@ -572,23 +643,31 @@ async function runTurn(comments, message, userText) {
   const turnId = nextTurnId();
   currentTurnId = turnId;
   const t0 = Date.now();
-  let firstTokenAt = 0, editsN = 0;
+  let firstTokenAt = 0;
   thread.push({ role: "user", text: userText });
   broadcast({ type: "turn", role: "user", text: userText });
   process.stdout.write(`\n\x1b[1m\x1b[38;5;209m› you\x1b[0m\n${userText}\n`);
   logEvent("turn_started", { turnId, comments_n: comments.length, text_len: userText.length });
 
+  let beforeContent = "";
+  try {
+    beforeContent = readFileSync(FILE, "utf8");
+  } catch {
+    /* ignore */
+  }
   snapshot();
-  const before = mtimeOf();
   editing = true;
+  const editEvents = []; // the agent's own Edit/Write fragments, this turn
   let out;
   try {
     out = await agent.send(buildTurnPrompt(comments, message), (e) => {
       if (e.kind === "token") {
         if (!firstTokenAt) { firstTokenAt = Date.now(); logEvent("turn_first_token", { turnId, ms: firstTokenAt - t0 }); }
         broadcast({ type: "token", text: e.text }); // live-typing reply
+      } else if (e.kind === "edit") {
+        editEvents.push(e);
       } else {
-        if (e.kind === "tool") { logEvent("tool_used", { turnId, tool: e.name || null, n: e.n || 1 }); if (e.name === "Edit" || e.name === "Write" || e.name === "MultiEdit") editsN += (e.n || 1); }
+        if (e.kind === "tool") logEvent("tool_used", { turnId, tool: e.name || null, n: e.n || 1 });
         broadcast({ type: "activity", kind: e.kind, text: e.text });
         if (e.kind === "tool" || e.kind === "error") process.stdout.write(`\x1b[2m  · ${e.text}\x1b[0m\n`);
       }
@@ -600,10 +679,30 @@ async function runTurn(comments, message, userText) {
   while (thread.length > 400) thread.shift(); // bound memory + /thread payload
   broadcast({ type: "turn-end", reply: out.reply });
   process.stdout.write(`\x1b[1m\x1b[38;5;79m‹ claude\x1b[0m\n${out.reply}\n`);
-  const changed = mtimeOf() !== before;
-  if (changed) { broadcast({ type: "reload", changed: true }); logEvent("edit_applied", { turnId, edits_n: editsN }); logEvent("file_reloaded", { turnId }); }
-  logEvent("turn_completed", { turnId, ok: !!out.ok, changed, edits_n: editsN, duration_ms: Date.now() - t0, reply_len: (out.reply || "").length });
+
+  // Faithful "what changed" readout: compare before/after CONTENT (not mtime — a
+  // no-op/whitespace rewrite must not report "updated"), attributed by the agent's
+  // own edits. Persist under a changeId the client fetches AFTER the reload.
+  let afterContent = "";
+  try {
+    afterContent = readFileSync(FILE, "utf8");
+  } catch {
+    /* ignore */
+  }
+  const change = computeChange(beforeContent, afterContent, editEvents);
+  const editsN = editEvents.reduce((a, e) => a + ((e.newStrings && e.newStrings.length) || 1), 0);
+  if (change.contentChanged) {
+    const changeId = putChange(change);
+    broadcast({ type: "reload", changed: true, changeId });
+    logEvent("edit_applied", { turnId, edits_n: editsN });
+    logEvent("file_reloaded", { turnId, changeId });
+  }
+  logEvent("turn_completed", { turnId, ok: !!out.ok, changed: !!change.contentChanged, edits_n: editsN, duration_ms: Date.now() - t0, reply_len: (out.reply || "").length });
   currentTurnId = null;
+  const visN = change.fragments.filter((f) => f.type === "visual").length;
+  process.stdout.write(
+    `\x1b[2m  · change: ${change.kind} ${change.byteDelta >= 0 ? "+" : ""}${change.byteDelta}b · ${change.fragments.length} frag (${visN} visual) · ${editEvents.length} edit-call(s)\x1b[0m\n`
+  );
   return out;
 }
 
@@ -682,6 +781,21 @@ const OVERLAY = /* html */ `
   /* change pulse: flash elements the agent just edited */
   @keyframes gl-flash{0%{box-shadow:0 0 0 3px rgba(196,98,63,.0)}18%{box-shadow:0 0 0 3px rgba(196,98,63,.55);background:rgba(196,98,63,.10)}100%{box-shadow:0 0 0 3px rgba(196,98,63,0)}}
   .gl-changed{animation:gl-flash 1.6s ease-out}
+  /* "what changed" count chip + stepper (the visual locator) */
+  #gl-change-chip{position:fixed;right:16px;bottom:16px;z-index:2147483646;display:flex;align-items:center;gap:8px;
+    background:#1b1a18;color:#f2ede3;border:1px solid #3a3733;border-radius:20px;padding:6px 8px 6px 12px;
+    font:12.5px/1.2 ui-sans-serif,system-ui,sans-serif;box-shadow:0 6px 22px rgba(0,0,0,.3);
+    animation:gl-pop .22s cubic-bezier(.23,1,.32,1);transition:opacity .55s ease}
+  #gl-change-chip.gl-fade{opacity:0}
+  #gl-change-chip .gl-cc-dot{width:8px;height:8px;border-radius:50%;background:#c4623f;flex:none}
+  #gl-change-chip .gl-cc-l{font-weight:600;white-space:nowrap}
+  #gl-change-chip .gl-step{background:#302d29;border:1px solid #46423c;color:#f2ede3;border-radius:7px;cursor:pointer;font:inherit;line-height:1;padding:3px 8px}
+  #gl-change-chip .gl-step:hover{background:#3a3631}
+  #gl-change-chip .gl-step-i{color:#9a948a;font-size:11px;min-width:30px;text-align:center}
+  #gl-change-chip .gl-cc-x{background:none;border:0;color:#8f897e;cursor:pointer;font-size:15px;line-height:1;padding:0 2px}
+  #gl-change-chip .gl-cc-x:hover{color:#f2ede3}
+  #gl-frameflash{position:fixed;inset:0;z-index:2147483640;pointer-events:none;box-shadow:inset 0 0 0 3px rgba(196,98,63,.5);animation:gl-framefade 1.4s ease-out forwards}
+  @keyframes gl-framefade{0%{opacity:0}20%{opacity:1}100%{opacity:0}}
   #gl-toast{position:fixed;left:50%;top:18px;transform:translateX(-50%) translateY(-12px);z-index:2147483647;opacity:0;
     background:#1b1a18;color:#f2ede3;border:1px solid #3a3733;border-radius:20px;padding:7px 15px;font:13px ui-sans-serif,system-ui,sans-serif;
     box-shadow:0 8px 24px rgba(0,0,0,.25);transition:opacity .25s,transform .25s;pointer-events:none}
@@ -753,17 +867,20 @@ const OVERLAY = /* html */ `
     closePop();
     pop=document.createElement('div'); pop.id='gl-pop';
     var tag=(el.tagName||'el').toLowerCase()+(el.id?('#'+el.id):'');
+    var single=pending.length===0; // one element, nothing queued → Enter sends
     pop.innerHTML='<div class="gl-tag">&lt;'+esc(tag)+'&gt;'+(sel?(' · "'+esc(sel.slice(0,40))+'"'):'')+'</div>'+
-      '<textarea placeholder="What about this? (attach to your message)"></textarea>'+
-      '<div class="gl-row"><button class="gl-cancel">Cancel</button><button class="gl-go">Attach ⏎</button></div>';
+      '<textarea placeholder="'+(single?'Describe the change… (Enter sends)':'What about this? (adds to your message)')+'"></textarea>'+
+      '<div class="gl-row"><button class="gl-cancel">Cancel</button>'+(single?'<button class="gl-stack" title="pin this and keep adding">+ pin</button>':'')+'<button class="gl-go">'+(single?'Send ⏎':'Attach ⏎')+'</button></div>';
     document.body.appendChild(pop);
     var px=Math.min(x,window.innerWidth-316), py=Math.min(y,window.innerHeight-180);
     pop.style.left=Math.max(8,px)+'px'; pop.style.top=Math.max(8,py)+'px';
     var ta=pop.querySelector('textarea'); ta.focus();
     pop.querySelector('.gl-cancel').onclick=closePop;
-    function add(){ var t=ta.value.trim(); if(!t) return; attach(el,outer,sel,t,tag); closePop(); }
-    pop.querySelector('.gl-go').onclick=add;
-    ta.addEventListener('keydown',function(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); add(); } });
+    function doAttach(){ var t=ta.value.trim(); if(!t) return false; attach(el,outer,sel,t,tag); closePop(); return true; }
+    function doPrimary(){ if(doAttach() && single) send(); } // single: attach + send in one motion
+    pop.querySelector('.gl-go').onclick=doPrimary;
+    var stackBtn=pop.querySelector('.gl-stack'); if(stackBtn) stackBtn.onclick=doAttach;
+    ta.addEventListener('keydown',function(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); doPrimary(); } });
   }
 
   function attach(el,outer,sel,text,tag){
@@ -851,8 +968,8 @@ const OVERLAY = /* html */ `
     var msg=input.value.trim();
     if(turnActive || (!pending.length && !msg)) return;
     var batch=pending.slice();
-    // remember what we pointed at so we can flash it after the edit reloads
-    try{ sessionStorage.setItem('gl-flash', JSON.stringify(batch.map(function(c){return locator(c.el);}).filter(Boolean))); }catch(e){}
+    // The "what changed" readout no longer flashes what you POINTED AT — it flashes
+    // what the agent actually CHANGED, fetched by changeId after the reload (below).
     pending=[]; clearBadges(); renderPending(); input.value=''; input.style.height='auto'; showPanel(); refreshSend();
     fetch('/__galley/send',{method:'POST',headers:authHeaders({'content-type':'application/json'}),
       body:JSON.stringify({message:msg, comments:batch.map(function(c){return {comment:c.comment,outerHTML:c.outer,sel:c.sel,tag:c.tag};})})})
@@ -874,19 +991,67 @@ const OVERLAY = /* html */ `
   function loadThread(){
     fetch('/__galley/thread'+KQ).then(function(r){return r.json();}).then(function(d){
       thread.innerHTML=''; emptyShown=false; live=null; liveText='';
-      if(!d.thread||!d.thread.length){ thread.innerHTML='<div class="gl-empty">Ask Claude about this document, or turn on 💬 Comment to point at something. Edits are free — they run on your Claude subscription.</div>'; emptyShown=true; }
+      if(!d.thread||!d.thread.length){ thread.innerHTML='<div class="gl-empty">Ask Claude about this document, or turn on 💬 Comment to point at something.</div>'; emptyShown=true; }
       else d.thread.forEach(function(t){ bubble(t.role, t.text); });
       scroll();
     }).catch(function(){});
   }
 
   function toast(msg){ var t=byId('gl-toast'); t.textContent=msg; t.classList.add('gl-show'); setTimeout(function(){t.classList.remove('gl-show');},1800); }
-  // After an edit-driven reload, flash what changed + say so.
-  (function(){ var f; try{ f=sessionStorage.getItem('gl-flash'); sessionStorage.removeItem('gl-flash'); }catch(e){}
-    if(f){ var sels=[]; try{sels=JSON.parse(f);}catch(e){} var any=false;
-      sels.forEach(function(sel){ try{ var el=document.querySelector(sel); if(el){ any=true; el.classList.add('gl-changed'); setTimeout(function(){el.classList.remove('gl-changed');},1700); } }catch(e){} });
-      setTimeout(function(){ toast(any?'✓ updated':'✓ done'); },120);
-    } }());
+
+  // ---- "what changed" visual locator -------------------------------------------
+  // After an edit-driven reload, fetch the faithful change (the agent's own edits),
+  // flash the elements that ACTUALLY changed, and show a count chip with a stepper.
+  function flashEl(el){ if(!el) return; el.classList.remove('gl-changed'); void el.offsetWidth; el.classList.add('gl-changed'); setTimeout(function(){el.classList.remove('gl-changed');},1700); }
+  function flashFrame(){ var d=document.createElement('div'); d.id='gl-frameflash'; document.body.appendChild(d); setTimeout(function(){ if(d.parentNode) d.remove(); },1400); }
+  function stripTags(s){ return String(s).replace(/<[^>]*>/g,' ').replace(/\\s+/g,' ').trim(); }
+  // Smallest (deepest) on-page element whose text contains the changed fragment.
+  function findAnchor(fragText){
+    var needle=stripTags(fragText).slice(0,60); if(needle.length<3) return null;
+    var all=document.body?document.body.getElementsByTagName('*'):[]; var best=null;
+    for(var i=0;i<all.length;i++){ var el=all[i]; if(inUI(el)) continue;
+      if((el.textContent||'').indexOf(needle)>=0){ if(!best||best.contains(el)) best=el; } }
+    return best;
+  }
+  var chipEl=null, chipAnchors=[], chipIdx=0, chipTimer=null;
+  function dismissChip(){ if(chipTimer){clearTimeout(chipTimer);chipTimer=null;} if(chipEl){chipEl.remove(); chipEl=null;} }
+  function stepTo(i){ if(!chipAnchors.length) return; chipIdx=((i%chipAnchors.length)+chipAnchors.length)%chipAnchors.length;
+    var el=chipAnchors[chipIdx]; try{ el.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){ try{el.scrollIntoView();}catch(_){} } flashEl(el);
+    if(chipEl){ var ind=chipEl.querySelector('.gl-step-i'); if(ind) ind.textContent=(chipIdx+1)+'/'+chipAnchors.length; if(chipTimer){clearTimeout(chipTimer);chipTimer=null;} } }
+  function showChip(label, anchors){
+    dismissChip(); chipAnchors=anchors||[]; chipIdx=0;
+    chipEl=document.createElement('div'); chipEl.id='gl-change-chip';
+    var stepper=chipAnchors.length>1?'<button class="gl-step" data-d="-1" title="previous change">‹</button><span class="gl-step-i">1/'+chipAnchors.length+'</span><button class="gl-step" data-d="1" title="next change">›</button>':'';
+    chipEl.innerHTML='<span class="gl-cc-dot"></span><span class="gl-cc-l">'+esc(label)+'</span>'+stepper+'<button class="gl-cc-x" title="dismiss">×</button>';
+    document.body.appendChild(chipEl);
+    chipEl.querySelector('.gl-cc-x').onclick=dismissChip;
+    Array.prototype.forEach.call(chipEl.querySelectorAll('.gl-step'),function(b){ b.onclick=function(){ stepTo(chipIdx+(+b.getAttribute('data-d'))); }; });
+    if(chipAnchors.length){ var l=chipEl.querySelector('.gl-cc-l'); l.style.cursor='pointer'; l.title='jump to the change'; l.onclick=function(){ stepTo(chipIdx); }; }
+    chipTimer=setTimeout(function(){ if(chipEl){ chipEl.classList.add('gl-fade'); setTimeout(dismissChip,600); } },6000);
+  }
+  function renderChange(c){
+    if(!c||c.kind==='unknown'||c.kind==='none') return;
+    if(c.kind==='write'){ flashFrame(); showChip('rewrote the page',[]); return; }
+    var anchors=[], styleN=0, scriptN=0, missN=0;
+    (c.fragments||[]).slice(0,30).forEach(function(f){
+      if(f.type==='style'){ styleN++; return; } if(f.type==='script'){ scriptN++; return; }
+      var el=findAnchor(f.text); if(el){ if(anchors.indexOf(el)<0) anchors.push(el); } else { missN++; }
+    });
+    anchors.forEach(flashEl);
+    var label;
+    if(anchors.length) label=anchors.length+(anchors.length===1?' change':' changes');
+    else if(styleN) label='styles changed';
+    else if(scriptN) label='script changed';
+    else if(missN) label='changed (no visible element)';
+    else label='updated';
+    if(!anchors.length&&(styleN||scriptN||missN)) flashFrame(); // never a silent miss: if no element anchored, flash the frame so the change is still surfaced
+    showChip(label, anchors);
+    if(anchors.length){ var r=anchors[0].getBoundingClientRect(); if(r.bottom<0||r.top>window.innerHeight) stepTo(0); }
+  }
+  (function(){ var cid; try{ cid=sessionStorage.getItem('gl-change-id'); sessionStorage.removeItem('gl-change-id'); }catch(e){}
+    if(!cid) return;
+    fetch('/__galley/change?id='+encodeURIComponent(cid)+(GL_ROLE==='guest'&&GL_SHARE?('&k='+encodeURIComponent(GL_SHARE)):''),{headers:authHeaders()})
+      .then(function(r){return r.json();}).then(renderChange).catch(function(){}); }());
 
   // ---- share: role-based UI (guest vs host) ----
   var approvalsBox=null;
@@ -906,7 +1071,7 @@ const OVERLAY = /* html */ `
 
   var es=new EventSource('/__galley/events'+KQ);
   es.onmessage=function(ev){ try{ var d=JSON.parse(ev.data);
-    if(d.type==='reload'){ location.reload(); }
+    if(d.type==='reload'){ try{ if(d.changeId) sessionStorage.setItem('gl-change-id', String(d.changeId)); }catch(e){} location.reload(); }
     else if(d.type==='turn' && d.role==='user'){ bubble('user', d.text); setBusyUI(true); showWarm(); }
     else if(d.type==='token'){ onToken(d.text); }
     else if(d.type==='turn-end'){ endTurn(d.reply); }
@@ -1004,6 +1169,16 @@ const server = createServer(async (req, res) => {
     if (!canRead) { res.writeHead(403); res.end(JSON.stringify({ thread: [] })); return; }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ thread, share: SHARE ? { expires: SHARE_EXPIRES } : null }));
+    return;
+  }
+
+  // Read-only: the faithful change payload for one turn (fetched after the reload
+  // to drive the "what changed" visual locator).
+  if (path === "/__galley/change") {
+    if (!canRead) { res.writeHead(403); res.end(JSON.stringify({ kind: "unknown" })); return; }
+    const c = changes.get(+(url.searchParams.get("id") || 0));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(c || { kind: "unknown" }));
     return;
   }
 
@@ -1149,7 +1324,7 @@ function preflightClaude() {
   if (r.error || (r.status !== 0 && !r.stdout)) {
     console.error("\n  galley-lite needs Claude Code, and it isn't runnable.\n");
     console.error("  Install it:   npm install -g @anthropic-ai/claude-code");
-    console.error("  Log in:       claude   (then sign in with your Claude subscription)");
+    console.error("  Auth:         export ANTHROPIC_API_KEY=...   (or: run `claude` once to log in)");
     console.error("  Docs:         https://docs.anthropic.com/en/docs/claude-code\n");
     process.exit(1);
   }
@@ -1170,11 +1345,12 @@ server.on("error", (e) => {
 });
 server.on("listening", () => {
   const url = `http://localhost:${boundPort}`;
-  logEvent("server_start", { port: boundPort, requestedPort: PORT, model: MODEL, linkMode, sessionId, apiKeyIgnored: !!process.env.ANTHROPIC_API_KEY });
+  logEvent("server_start", { port: boundPort, requestedPort: PORT, model: MODEL, linkMode, sessionId, apiKey: !!process.env.ANTHROPIC_API_KEY });
   console.log(`\n  galley-lite → ${url}`);
   console.log(`  editing:   ${FILE}`);
-  console.log(`  model:     ${MODEL} (Claude subscription, $0 marginal)`);
-  if (process.env.ANTHROPIC_API_KEY) console.log(`  note:      ANTHROPIC_API_KEY detected — ignored so edits bill your Claude subscription ($0), not the metered API.`);
+  console.log(`  model:     ${MODEL}`);
+  if (process.env.ANTHROPIC_API_KEY) console.log(`  auth:      ANTHROPIC_API_KEY — edits bill the Anthropic API (metered).`);
+  else console.log(`  auth:      your local Claude Code login (set ANTHROPIC_API_KEY to bill the API instead).`);
   console.log(`  agent cwd: ${AGENT_CWD}`);
   const linkLabel = { auto: "auto-linked to its build session", marker: "linked via marker", resume: "linked (--resume)", fresh: "" }[linkMode];
   console.log(`  session:   ${sessionId ? sessionId + (linkLabel ? " — " + linkLabel : "") : "fresh per doc (chains forward)"}`);

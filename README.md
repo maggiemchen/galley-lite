@@ -1,10 +1,10 @@
 # galley-lite
 
-Point at any HTML file and reconnect to the Claude Code session that built it — visually.
+Work with the agent that built your page by pointing at the result, not by typing at a terminal.
 
-galley-lite is not an HTML editor. It's a visual layer for resuming Claude Code sessions, anchored to their output. You run it on a file, click elements on the rendered page or just chat, and the original build session edits the file in place and live-reloads it. Local, private, and free — it runs on your Claude subscription, not the metered API.
+galley-lite is not an HTML editor. It's a visual way to work with the agent that built your page: open the file, point at any element or just talk, and it changes in place and live-reloads. Instead of reading a diff in a transcript, you watch the page update. Under the hood it reconnects to the Claude Code session that built the file, so edits inherit the intent, sources, and reasoning behind it, not just the rendered HTML. Local, private, and bring-your-own-key: set `ANTHROPIC_API_KEY` and edits run on the Anthropic API.
 
-![galley-lite demo](https://raw.githubusercontent.com/maggiemchen/galley-lite/main/docs/demo.gif)
+![demo](docs/demo.gif)
 
 ## What it does
 
@@ -13,12 +13,12 @@ galley-lite is not an HTML editor. It's a visual layer for resuming Claude Code 
 - **Edits the file in place + live-reloads.** A warm `claude` session edits the file on disk; the page reloads itself and flashes the elements that changed.
 - **Streams the reply.** Token-by-token, rendered as markdown, with live tool activity ("Reading report.html", "Editing report.html").
 - **Undo and Stop.** Undo reverts the last turn (50 deep). Stop kills the in-flight turn.
-- **$0 marginal.** It shells out to `claude` with `ANTHROPIC_API_KEY` stripped, so every edit bills your Claude subscription, not the metered API.
+- **Bring your own key.** It shells out to the official `claude` CLI. If `ANTHROPIC_API_KEY` is set, edits bill the Anthropic API (metered). If it isn't, `claude` uses whatever auth you've already configured locally.
 
 ## Requirements
 
-- **Claude Code installed and logged in** (`claude` on your `PATH`).
-- **An active Claude subscription** (Pro or Max). galley-lite intentionally strips `ANTHROPIC_API_KEY` so edits run on your subscription at $0 marginal cost.
+- **Claude Code installed** (`claude` on your `PATH`).
+- **An Anthropic API key** — `export ANTHROPIC_API_KEY=...` and edits run on the metered API. (If you don't set one, `claude` falls back to whatever auth you've already configured locally.)
 - Node 18+ (zero npm dependencies — it's a single file using only Node built-ins).
 
 ## Install
@@ -54,7 +54,7 @@ galley-lite runs a tiny loopback HTTP server that serves your HTML with an overl
 
 - **Warm session.** The process boots once (resuming the build session if found) and keeps the document and conversation in context. The first turn pays the boot + read; every follow-up skips both, so later turns are fast.
 - **Auto-link.** Before booting, it finds the session that built the file and resumes it — so edits are made by the agent that already knows the file's history, with no flags.
-- **$0.** `ANTHROPIC_API_KEY` is removed from the child's environment, so `claude` bills your subscription. If the key is set, galley-lite prints a note that it's being ignored on purpose.
+- **Auth pass-through.** galley-lite doesn't touch credentials. If `ANTHROPIC_API_KEY` is in your environment, the `claude` child inherits it and bills the Anthropic API; if not, `claude` uses your existing local login. The startup banner prints which one is active.
 
 A pure question doesn't reload the page; an edit reloads it once when the turn finishes. The conversation lives server-side, so it survives reloads.
 
@@ -119,7 +119,7 @@ Requires `cloudflared` (`brew install cloudflared`). It's mandatory on purpose: 
 ## FAQ
 
 **Does it cost money?**
-No marginal cost. galley-lite strips `ANTHROPIC_API_KEY` and shells out to `claude`, so edits run on your existing Claude subscription, not the metered API. You need an active subscription (Pro or Max).
+galley-lite is free and open source. Token usage is billed by Anthropic: set `ANTHROPIC_API_KEY` and edits run on the metered Anthropic API, billed to your key. galley-lite never handles or stores your credentials — it shells out to the official `claude` CLI, which reads them from your environment.
 
 **Is my code or my file sent anywhere?**
 Only to Claude, the same way any Claude Code session sends context to Anthropic. galley-lite itself is local: a loopback server, no telemetry, no third-party services, no account. Your file is edited in place on disk.

@@ -83,7 +83,7 @@ const browser = await chromium.launch();
 
   { const s = scope(b.log); const before = headline(doc);
     await typeSend(page, "Change the main headline text to exactly: GalleyOne");
-    const ok = await until(() => s.all("turn_completed").length >= 1) && await until(() => headline(doc) === "GalleyOne", 8000, 400);
+    const ok = await until(() => s.all("turn_completed").length >= 1, 300000) && await until(() => headline(doc) === "GalleyOne", 10000, 400); // generous: cold agent boot can be slow under system load
     const tc = s.last("turn_completed");
     rec("J7", "chat edit applied + reload", ok && s.has("edit_applied") && s.has("file_reloaded"), `"${before}"→"${headline(doc)}", edit_applied=${s.has("edit_applied")}, reload=${s.has("file_reloaded")}, ${tc?.duration_ms}ms`);
     rec("J9", "cold first turn", !!tc, `${tc?.duration_ms}ms`);
@@ -115,6 +115,7 @@ const browser = await chromium.launch();
     await attachComment(page, "#headline", "comment one"); await sleep(200);
     await attachComment(page, "#lede", "comment two"); await sleep(200);
     await attachComment(page, "#users", "comment three"); await sleep(200);
+    await page.waitForFunction(() => document.querySelectorAll("#gl-pending .gl-chip").length === 3, { timeout: 8000 }).catch(() => {});
     const chips = await page.evaluate(() => document.querySelectorAll("#gl-pending .gl-chip").length);
     await clickSend(page);
     await until(() => s.all("turn_completed").length >= 1);

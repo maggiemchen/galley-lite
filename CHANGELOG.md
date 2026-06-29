@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0 — 2026-06-29
+
+API-key-first + the "what changed" visual locator.
+
+- **Bring your own key.** galley-lite no longer strips `ANTHROPIC_API_KEY` — it
+  shells out to the official `claude` CLI and the key (if set) bills the metered
+  Anthropic API; if unset, `claude` uses your existing local auth. This is the
+  ToS-clean path (running third-party harnesses on a Pro/Max subscription token
+  is what Anthropic enforced against in Jan 2026).
+- **"What changed" visual locator.** After an edit, the changed element flashes
+  and a count chip + prev/next stepper appears — sourced from the agent's own
+  Edit fragments (content-compared, not mtime), so it shows what actually
+  changed, not what you clicked. Never a silent miss: if no element anchors, the
+  frame flashes so the change is always surfaced.
+- **One-Enter steer.** The element popover's primary action is Send for a single
+  pin (Enter sends), with "+ pin" to batch more.
+- **Deterministic event log** (opt-in via `GALLEY_EVENTS` / `GALLEY_EVENTS_LOG`)
+  for journey/metrics verification, plus a Playwright journey harness
+  (`test/journeys.mjs`), a readout check, and a locator dogfood.
+
 ## 0.1.2 — 2026-06-25
 
 Pre-publish DX pass (cold-install + CLI stress test):
