@@ -4,7 +4,7 @@ Work with the agent that built your page by pointing at the result, not by typin
 
 galley-lite is not an HTML editor. It's a visual way to work with the agent that built your page: open the file, point at any element or just talk, and it changes in place and live-reloads. Instead of reading a diff in a transcript, you watch the page update. Under the hood it reconnects to the Claude Code session that built the file, so edits inherit the intent, sources, and reasoning behind it, not just the rendered HTML. Local, private, and bring-your-own-key: set `ANTHROPIC_API_KEY` and edits run on the Anthropic API.
 
-![demo](docs/demo.gif)
+<!-- demo clip: re-record with BYO-key framing before the public post (see docs/LAUNCH.md) -->
 
 ## What it does
 
