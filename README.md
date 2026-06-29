@@ -4,7 +4,7 @@ Work with the agent that built your page by pointing at the result, not by typin
 
 galley-lite is not an HTML editor. It's a visual way to work with the agent that built your page: open the file, point at any element or just talk, and it changes in place and live-reloads. Instead of reading a diff in a transcript, you watch the page update. Under the hood it reconnects to the Claude Code session that built the file, so edits inherit the intent, sources, and reasoning behind it, not just the rendered HTML. Local, private, and bring-your-own-key: set `ANTHROPIC_API_KEY` and edits run on the Anthropic API.
 
-<!-- demo clip: re-record with BYO-key framing before the public post (see docs/LAUNCH.md) -->
+![demo](docs/demo.gif)
 
 ## What it does
 
@@ -102,6 +102,7 @@ galley-lite gives an agent write access to a directory on your machine, so it's 
 - **Per-run CSRF token + Host-header check.** State-changing endpoints require a per-run secret embedded only in the same-origin overlay (the custom header forces a CORS preflight that's never approved), and the server rejects unexpected `Host` headers — so neither a cross-origin page nor a DNS-rebinding site can read the conversation, read local files, or drive edits.
 - **Path-traversal-safe, auth-gated static serving.** Sibling assets are served only from the file's directory; over a share they require the share key, and dotfiles/secrets are blocked.
 - **Agent deny-list.** The `claude` process can't read `~/.ssh`, `~/.aws`, `.env` files, keys/credentials, or write shell rc files / git hooks — limiting the blast radius even if something tries to misuse it.
+- **Writes confined to the document's directory.** The agent runs in Claude's default permission mode with a directory-scoped allow-list, so it can only `Edit`/`Write` files under the folder of the document you opened — not elsewhere on disk. (If your own `~/.claude/settings.json` broadly allows writes, e.g. `Write(*)`, that global setting overrides this — so still point galley at a working directory, not `~`.)
 
 > **Trust boundary — only open HTML you trust.** galley-lite injects its UI into the document you open, in the *same browser origin*. A malicious HTML file could try to drive the agent. The deny-list above limits what it could reach, but the safe rule is: don't `galley-lite` an HTML file from someone you don't trust, and point it at a working directory, not `~` or a secrets folder.
 

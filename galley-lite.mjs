@@ -223,6 +223,18 @@ const approvals = new Map(); // id -> { who, userText, comments, message }
 // or write persistence/RCE paths. Verified: blocks .env/~/.ssh reads, edits still work.
 const AGENT_DENY = JSON.stringify({
   permissions: {
+    // Scope the agent's file MUTATIONS to the document's own directory. Combined
+    // with --permission-mode default (below), an Edit/Write outside DIR has no
+    // allow rule and can't prompt in -p mode, so it's blocked — a malicious
+    // document can't drive the agent to rewrite files elsewhere on disk. Reads
+    // stay broad (minus the secret deny-list) so the agent keeps full context.
+    allow: [
+      "Read(//**)",
+      "Grep",
+      "Glob",
+      `Edit(/${DIR}/**)`,
+      `Write(/${DIR}/**)`,
+    ],
     deny: [
       "Read(~/.ssh/**)",
       "Read(~/.aws/**)",
@@ -333,9 +345,10 @@ class ClaudeAgent {
       "--verbose",
       "--include-partial-messages", // stream the reply token-by-token
       "--permission-mode",
-      "acceptEdits",
+      "default", // not acceptEdits: unlisted paths can't auto-approve in -p, so Edit/Write is confined to the allow-list (the doc's dir) — see AGENT_DENY
       "--allowedTools",
-      "Read Edit Write Grep Glob",
+      "Read Grep Glob", // Edit/Write are granted ONLY via the dir-scoped settings allow-list (AGENT_DENY); a bare "Edit Write" here would override that scoping and let the agent write anywhere
+
       "--settings",
       AGENT_DENY, // deny reading secrets / writing persistence paths — limits blast radius
       "--model",

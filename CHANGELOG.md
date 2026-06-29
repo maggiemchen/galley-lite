@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 — 2026-06-29
+
+Security: confine the agent's writes to the document's directory.
+
+- The `claude` child now runs with `--permission-mode default` and a dir-scoped
+  allow-list (`Edit(//<doc-dir>/**)` / `Write(//<doc-dir>/**)`), and `Edit`/`Write`
+  are no longer in the bare `--allowedTools` (a bare grant overrode the scope). Net:
+  a malicious or untrusted document can no longer drive the agent to write files
+  **outside the document's own directory**. In-dir edits are unaffected.
+- Caveat: if your user-level `~/.claude/settings.json` broadly allows writes (e.g.
+  `Write(*)`), Claude Code unions that in and it overrides this scoping — galley
+  can't un-grant your own global allow. Point galley at a working directory, not
+  `~` or a secrets folder (see README → Security).
+- README now embeds a live demo and documents the trust boundary.
+
 ## 0.2.0 — 2026-06-29
 
 API-key-first + the "what changed" visual locator.
