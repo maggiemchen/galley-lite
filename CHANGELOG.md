@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 — 2026-06-29
+
+Docs: the README now leads with the point-to-edit demo (the actual differentiator) instead of the chat-box clip, via an absolute image URL that renders on both GitHub and npm, plus a link to the full feature tour. No code changes.
+
 ## 0.2.1 — 2026-06-29
 
 Security: confine the agent's writes to the document's directory.
