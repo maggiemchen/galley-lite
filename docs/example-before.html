@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>How HTTPS Works</title>
+<style>body{font-family:Georgia,serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222}h1{font-size:28px}h2{font-size:20px;margin-top:28px}p{margin:12px 0}</style>
+</head><body>
+<h1>How HTTPS Works: From Typing a URL to a Secure Page</h1>
+<p>When you type a web address into your browser and press enter, a surprising number of steps happen before the page appears. This document explains each stage in words.</p>
+<h2>Step 1: DNS Resolution</h2>
+<p>First, the browser needs to turn the human-readable domain name (like example.com) into an IP address that computers use to route traffic. It asks a DNS resolver, which may check its cache, then query a root server, a top-level-domain server, and finally the authoritative name server for the domain. The resolver returns the IP address to the browser. This can involve four or more round trips if nothing is cached.</p>
+<h2>Step 2: TCP Connection</h2>
+<p>With the IP address known, the browser opens a TCP connection to the server on port 443. This uses a three-way handshake: the client sends a SYN packet, the server replies with a SYN-ACK packet, and the client responds with an ACK packet. Only after these three messages is the connection established and ready to carry data.</p>
+<h2>Step 3: TLS Handshake</h2>
+<p>Because HTTPS is encrypted, the client and server must agree on encryption keys before sending any real data. The client sends a ClientHello listing supported cipher suites. The server responds with a ServerHello choosing a cipher, and sends its certificate. The client verifies the certificate against trusted authorities, then both sides perform a key exchange to derive a shared secret. Finally each side sends a Finished message, and the encrypted channel is ready.</p>
+<h2>Step 4: The HTTP Request and Response</h2>
+<p>Now the browser sends an encrypted HTTP request: a method (GET), a path, and headers. The server processes it, perhaps querying a database or cache, and returns a response with a status code (like 200 OK), headers, and the HTML body. The browser then parses the HTML, requests additional resources like CSS, JavaScript, and images, and renders the page.</p>
+<h2>Step 5: Caching</h2>
+<p>To make future visits faster, responses can be cached at several layers: the browser cache, a CDN edge node, and the server. Cache headers like Cache-Control and ETag tell each layer how long to store a resource and how to check whether it has changed. A well-cached site can skip most of the earlier steps entirely on repeat visits.</p>
+</body></html>

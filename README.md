@@ -12,6 +12,14 @@ Turn on Comment, point at **any** element — the headline, a button, a paragrap
 
 ▶ **[Watch the full feature tour (41s)](https://github.com/maggiemchen/galley-lite/raw/main/docs/promo-features.mp4)** — batch comments, the "what changed" stepper, undo, session-resume.
 
+### A real example: a wall of text → a visual explainer
+
+Not staged — this is one actual galley edit. A plain text-only page ([`example-before.html`](docs/example-before.html)) became a dark, diagrammed explainer ([`example-after.html`](docs/example-after.html)) — a color-coded request-lifecycle flow and a real inline-SVG TLS handshake sequence diagram — from a single request: *"turn this wall of text into a visual explainer with diagrams."*
+
+| Before | After |
+|---|---|
+| ![before: wall of text](https://raw.githubusercontent.com/maggiemchen/galley-lite/main/docs/example-before.png) | ![after: diagrams + SVG](https://raw.githubusercontent.com/maggiemchen/galley-lite/main/docs/example-after.png) |
+
 ## What it does
 
 - **Reconnects to the build session.** On startup it scans `~/.claude/projects` for the Claude Code session that did a `Write`/`Edit` to this exact file, and resumes it. Edits inherit *how and why* the file was built — its sources, data, and reasoning — not just the rendered HTML.
