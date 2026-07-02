@@ -4,7 +4,11 @@ Work with the agent that built your page by pointing at the result, not by typin
 
 galley-lite is not an HTML editor. It's a visual way to work with the agent that built your page: open the file, point at any element or just talk, and it changes in place and live-reloads. Instead of reading a diff in a transcript, you watch the page update. Under the hood it reconnects to the Claude Code session that built the file, so edits inherit the intent, sources, and reasoning behind it, not just the rendered HTML. Local, private, and bring-your-own-key: set `ANTHROPIC_API_KEY` and edits run on the Anthropic API.
 
-![galley-lite: point at an element, Claude edits the real file](https://raw.githubusercontent.com/maggiemchen/galley-lite/main/docs/promo.gif)
+![galley-lite: point at any element and Claude edits the real file](https://raw.githubusercontent.com/maggiemchen/galley-lite/main/docs/promo-feature.gif)
+
+Turn on Comment, point at **any** element — the headline, a button, a paragraph — and galley-lite auto-detects it (shown as its tag, e.g. `<h1#headline>`). Say what you want, and it edits the real file in place:
+
+![How it works: point at any element, it detects it, then edits the file](https://raw.githubusercontent.com/maggiemchen/galley-lite/main/docs/feature-examples.png)
 
 ▶ **[Watch the full feature tour (41s)](https://github.com/maggiemchen/galley-lite/raw/main/docs/promo-features.mp4)** — batch comments, the "what changed" stepper, undo, session-resume.
 
